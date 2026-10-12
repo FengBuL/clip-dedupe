@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **Clip Dedupe has been merged into [Note Pulse](https://github.com/FengBuL/note-pulse) (1.4.0+) as “Duplicate cleanup / 重复内容清理”.** New features and fixes land there. Install Note Pulse from Community plugins, then disable and remove Clip Dedupe; Note Pulse picks up your Clip Dedupe settings automatically.
+>
+> **Clip Dedupe 已并入 [Note Pulse](https://github.com/FengBuL/note-pulse)（1.4.0 起），名为“重复内容清理”。** 之后的更新都在 Note Pulse 里。从社区插件安装 Note Pulse 后，关闭并卸载 Clip Dedupe 即可，原来的设置会自动沿用。
+
 # Clip Dedupe · 重复内容清理
 
 [中文](#中文说明) · [English](#english)
