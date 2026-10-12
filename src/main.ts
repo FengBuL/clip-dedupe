@@ -1,9 +1,10 @@
-import { Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, debounce, normalizePath } from "obsidian";
+import { Notice, Plugin, TAbstractFile, TFile, TFolder, WorkspaceLeaf, debounce, normalizePath } from "obsidian";
 import { Analysis, DupGroup, Occurrence } from "./core/group";
 import { ApplyIO, ApplyResult, BackupRecord, UndoResult, executePlan, undoBackup } from "./core/engine";
 import { CleanMode, Plan, PlanItem, buildPlan } from "./core/plan";
 import { StrKey, initLanguage, t } from "./i18n";
-import { ConfirmModal, PreviewModal } from "./modals";
+import { groupKey } from "./core/summary";
+import { ConfirmModal, HelpModal, PreviewModal } from "./modals";
 import { ScanControl, ScanProgress, cacheKey, runScan } from "./scanner";
 import { ClipDedupeSettingTab, ClipDedupeSettings, DEFAULT_SETTINGS } from "./settings";
 import { BackupStore, ScanCache } from "./store";
@@ -51,10 +52,12 @@ export default class ClipDedupePlugin extends Plugin {
     await this.refreshBackupInfo();
 
     this.registerView(VIEW_TYPE_CLIP_DEDUPE, (leaf) => new ClipDedupeView(leaf, this));
-    this.addRibbonIcon("layers", t("ribbonScan"), () => void this.openReport(true));
-    this.addCommand({ id: "scan", name: t("cmdScan"), callback: () => void this.openReport(true) });
+    // Opening shows the welcome screen first, so nobody starts a scan without knowing what it does
+    this.addRibbonIcon("layers", t("ribbonScan"), () => void this.openReport(false));
     this.addCommand({ id: "open-report", name: t("cmdOpen"), callback: () => void this.openReport(false) });
+    this.addCommand({ id: "scan", name: t("cmdScan"), callback: () => void this.openReport(true) });
     this.addCommand({ id: "undo-last", name: t("cmdUndo"), callback: () => void this.undoLast() });
+    this.addCommand({ id: "help", name: t("cmdHelp"), callback: () => this.openHelp() });
     this.addSettingTab(new ClipDedupeSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
@@ -102,6 +105,43 @@ export default class ClipDedupePlugin extends Plugin {
       setting.open?.();
       setting.openTabById?.(this.manifest.id);
     }
+  }
+
+  openHelp() {
+    new HelpModal(this.app).open();
+  }
+
+  /** Folders a beginner can pick from on the welcome screen (top two levels). */
+  folderList(): string[] {
+    return this.app.vault
+      .getAllLoadedFiles()
+      .filter((f): f is TFolder => f instanceof TFolder && !f.isRoot() && !f.path.startsWith(".") && f.path.split("/").length <= 2)
+      .map((f) => f.path)
+      .sort((a, b) => a.localeCompare(b));
+  }
+
+  async setScope(folder: string) {
+    this.settings.includeFolders = folder;
+    await this.saveSettings();
+  }
+
+  /* ---------------- ignoring ---------------- */
+
+  ignoredSet(): Set<string> {
+    return new Set(this.settings.ignored);
+  }
+
+  async ignoreGroup(g: DupGroup) {
+    const key = groupKey(g);
+    if (!this.settings.ignored.includes(key)) this.settings.ignored.push(key);
+    await this.saveData(this.settings);
+    this.notifyViews();
+  }
+
+  async restoreIgnored() {
+    this.settings.ignored = [];
+    await this.saveData(this.settings);
+    this.notifyViews();
   }
 
   /* ---------------- scanning ---------------- */
@@ -209,9 +249,9 @@ export default class ClipDedupePlugin extends Plugin {
     return out;
   }
 
-  startCleanup(items: PlanItem[]) {
+  startCleanup(items: PlanItem[], mode?: CleanMode) {
     if (items.length === 0) return;
-    new PreviewModal(this.app, this, items).open();
+    new PreviewModal(this.app, this, items, mode).open();
   }
 
   /** Itemises one group, optionally cleaning only some of its notes (used by the overlapping-notes view). */
@@ -272,6 +312,25 @@ export default class ClipDedupePlugin extends Plugin {
     }
   }
 
+  /** A short message after a cleanup, with an undo button right in it. */
+  showDoneToast(res: ApplyResult) {
+    const frag = createFragment();
+    const box = frag.createDiv({ cls: "cd-toast" });
+    let msg = res.changed.length ? t("doneToast", res.changed.length) : t("doneNone");
+    if (res.skipped.length) msg += t("doneSkipped", res.skipped.length);
+    box.createSpan({ cls: "cd-toast-text", text: msg });
+    let notice: Notice | null = null;
+    if (res.backupId && res.changed.length) {
+      const b = box.createEl("button", { cls: "cd-toast-btn", text: t("undo"), attr: { type: "button" } });
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        notice?.hide();
+        void this.undoLast();
+      });
+    }
+    notice = new Notice(frag, 12000);
+  }
+
   /** Re-reads the notes a moment after a cleanup or undo so the report matches what is on disk. */
   private rescanSoon() {
     window.setTimeout(() => void this.scan(), 800);
@@ -324,6 +383,7 @@ export default class ClipDedupePlugin extends Plugin {
   async loadSettings() {
     const raw = ((await this.loadData()) ?? {}) as Partial<ClipDedupeSettings>;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+    this.settings.ignored = Array.isArray(raw.ignored) ? raw.ignored.filter((x): x is string => typeof x === "string") : [];
   }
 
   async saveSettings() {

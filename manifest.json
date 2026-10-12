@@ -1,9 +1,9 @@
 {
   "id": "clip-dedupe",
   "name": "Clip Dedupe",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minAppVersion": "1.7.2",
-  "description": "Find and clean up duplicated blocks across notes, such as repeated clippings, daily dumps and AI reports, with preview and undo.",
+  "description": "Find the same passage repeated across several notes, such as clippings, daily captures and AI reports, and keep one copy. Preview first, undo any time.",
   "author": "FengBuL",
   "authorUrl": "https://github.com/FengBuL",
   "isDesktopOnly": false

@@ -7,7 +7,7 @@ const text = src.map((f) => fs.readFileSync(f, "utf8")).join("\n");
 const names = new Set(["circle-help", "help-circle"]);
 for (const m of text.matchAll(/setIcon\([^;]*?,\s*(?:"([a-z0-9-]+)"|[^"]*?\?\s*"([a-z0-9-]+)"\s*:\s*"([a-z0-9-]+)")/g)) for (const n of [m[1], m[2], m[3]]) if (n) names.add(n);
 for (const m of text.matchAll(/(?:iconButton\([^,]+,\s*|kpi\(|emptyState\([^,]+,\s*|"[a-z-]+",\s*"(?:kpi))\s*"([a-z0-9-]+)"/g)) names.add(m[1]);
-["layers", "files", "copy", "text", "whole-word", "check-circle", "circle-check", "refresh-cw", "play", "settings", "undo-2", "chevron-down", "chevron-up", "file-text", "check", "info"].forEach((n) => names.add(n));
+["layers", "files", "copy", "text", "whole-word", "check-circle", "circle-check", "refresh-cw", "play", "settings", "undo-2", "chevron-down", "chevron-up", "file-text", "check", "info", "search", "list-checks", "book-open", "folder", "shield-check", "sparkles", "sliders-horizontal", "tag", "link", "eraser", "arrow-right"].forEach((n) => names.add(n));
 const out = {};
 for (const n of names) {
   const f = path.join(dir, n + ".svg");

@@ -22,6 +22,8 @@ export interface ClipDedupeSettings {
   propertyName: string;
   backupsToKeep: number;
   openInNewTab: boolean;
+  /** Keys (see groupKey) of repeated passages the user chose to ignore. */
+  ignored: string[];
 }
 
 export const DEFAULT_SETTINGS: ClipDedupeSettings = {
@@ -40,6 +42,7 @@ export const DEFAULT_SETTINGS: ClipDedupeSettings = {
   propertyName: "duplicate_of",
   backupsToKeep: 10,
   openInNewTab: true,
+  ignored: [],
 };
 
 export function splitList(s: string): string[] {
@@ -99,7 +102,7 @@ export class ClipDedupeSettingTab extends PluginSettingTab {
 
     return [
       {
-        heading: t("setScope"),
+        heading: t("setBasic"),
         rows: [
           {
             name: t("setIncludeName"),
@@ -127,13 +130,8 @@ export class ClipDedupeSettingTab extends PluginSettingTab {
                 ta.inputEl.rows = 2;
               }),
           },
-        ],
-      },
-      {
-        heading: t("setMatching"),
-        rows: [
           {
-            name: t("setMinName"),
+            name: t("setMinName", st.minLength, Math.round(st.minLength / 2)),
             desc: t("setMinDesc"),
             render: (setting) =>
               setting.addText((tx) =>
@@ -143,6 +141,11 @@ export class ClipDedupeSettingTab extends PluginSettingTab {
                 })
               ),
           },
+        ],
+      },
+      {
+        heading: t("setAdvanced"),
+        rows: [
           { name: t("setFrontmatterName"), desc: t("setFrontmatterDesc"), render: (s) => toggle(s, () => st.ignoreFrontmatter, (v) => (st.ignoreFrontmatter = v)) },
           { name: t("setCodeName"), desc: t("setCodeDesc"), render: (s) => toggle(s, () => st.ignoreCode, (v) => (st.ignoreCode = v)) },
           { name: t("setHeadingsName"), desc: t("setHeadingsDesc"), render: (s) => toggle(s, () => st.ignoreHeadings, (v) => (st.ignoreHeadings = v)) },
@@ -175,11 +178,6 @@ export class ClipDedupeSettingTab extends PluginSettingTab {
                 })
               ),
           },
-        ],
-      },
-      {
-        heading: t("setCleanup"),
-        rows: [
           {
             name: t("setModeName"),
             desc: t("setModeDesc"),
@@ -233,11 +231,18 @@ export class ClipDedupeSettingTab extends PluginSettingTab {
               ),
           },
           { name: t("setNewTabName"), desc: t("setNewTabDesc"), render: (s) => toggle(s, () => st.openInNewTab, (v) => (st.openInNewTab = v)) },
-        ],
-      },
-      {
-        heading: t("setData"),
-        rows: [
+          {
+            name: t("setIgnoredName"),
+            desc: t("setIgnoredDesc", st.ignored.length),
+            render: (setting) =>
+              setting.addButton((b) => {
+                b.setButtonText(t("restore")).onClick(async () => {
+                  st.ignored = [];
+                  await save();
+                  this.plugin.notifyViews();
+                });
+              }),
+          },
           {
             name: t("setClearCacheName"),
             desc: t("setClearCacheDesc"),

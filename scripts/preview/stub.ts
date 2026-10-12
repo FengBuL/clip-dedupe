@@ -30,6 +30,8 @@ const g = window as unknown as Record<string, unknown>;
 g.createSpan = (o?: Opts) => create("span", o);
 g.createDiv = (o?: Opts) => create("div", o);
 g.createEl = (t: string, o?: Opts) => create(t, o);
+g.createFragment = () => document.createDocumentFragment();
+(DocumentFragment.prototype as unknown as Record<string, unknown>).createDiv = function (this: DocumentFragment, o?: Opts) { const el = create("div", o); this.appendChild(el); return el; };
 
 export class ItemView {
   app: unknown; contentEl: HTMLElement; containerEl: HTMLElement; leaf: unknown;
@@ -55,6 +57,7 @@ export class Modal {
 export class Notice { constructor(m: string) { console.log("NOTICE", m); } setMessage(_m: string) { return this; } hide() {} }
 export class TFile {}
 export class TAbstractFile {}
+export class TFolder {}
 export class Plugin {}
 export class PluginSettingTab {}
 export class Setting {}

@@ -3,7 +3,7 @@ import { analyze, FileRecord } from "../../src/core/group";
 import { buildPlan, CleanMode, groupItem, PlanItem } from "../../src/core/plan";
 import { tokenize } from "../../src/core/tokenize";
 import { initLanguage } from "../../src/i18n";
-import { PreviewModal } from "../../src/modals";
+import { HelpModal, PreviewModal } from "../../src/modals";
 import { ClipDedupeView } from "../../src/view";
 import { OPTS, POSTS, Post, frontmatter, postBullet, postQuote, sampleNote, table } from "../../tests/fixtures";
 
@@ -64,17 +64,26 @@ const analysis = analyze(records, { overlapThreshold: 0.7 });
 
 /* ---------- a fake plugin ---------- */
 const bn = (p: string) => p.replace(/\.md$/, "").split("/").pop() as string;
-const settings = { cleanMode: "mark" as CleanMode, propertyName: "duplicate_of", linkStyle: "embed", openInNewTab: true };
+const settings = { cleanMode: "mark" as CleanMode, propertyName: "duplicate_of", linkStyle: "embed", openInNewTab: true, includeFolders: "", ignored: [] as string[] };
 const lines = (path: string) => (vault.get(path)?.text ?? "").split("\n");
 const plugin = {
   settings,
-  analysis: scene === "idle" ? null : analysis,
+  analysis: scene === "idle" || scene === "help" ? null : scene === "none" ? analyze(records.filter((r) => r.path.startsWith("notes/随笔")), { overlapThreshold: 0.7 }) : analysis,
   analysisVersion: 1,
   scanning: scene === "scanning",
   stale: scene === "stale",
   scannedAt: Date.now(),
-  latestBackup: scene === "idle" || scene === "scanning" ? null : { id: "x", createdAt: Date.now(), files: 4 },
+  latestBackup: scene !== "undo" ? null : { id: "x", createdAt: Date.now(), files: 4 },
   scan: async () => {},
+  ignoredSet: () => new Set(settings.ignored),
+  folderList: () => ["AI报告", "Clippings", "notes", "notes/读书", "x"],
+  setScope: async (f: string) => {
+    settings.includeFolders = f;
+  },
+  ignoreGroup: async () => {},
+  restoreIgnored: async () => {},
+  openHelp: () => new HelpModal({} as never).open(),
+  showDoneToast: () => {},
   cancelScan: () => {},
   undoLast: async () => {},
   openSettings: () => {},
@@ -112,15 +121,14 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     await wait(150);
     const q = <T extends Element>(s: string) => document.querySelector<T>(s);
     const qa = <T extends Element>(s: string) => Array.from(document.querySelectorAll<T>(s));
-    if (scene === "groups" || scene === "modal" || scene === "modal-remove") {
-      qa<HTMLInputElement>(".cd-group .cd-check").slice(0, 2).forEach((c) => c.click());
-      q<HTMLButtonElement>(".cd-group .cd-expand")?.click();
+    if (scene === "folder") qa<HTMLButtonElement>(".cd-scope-opt")[1]?.click();
+    if (scene === "help") q<HTMLButtonElement>(".cd-what")?.click();
+    if (scene === "advanced") {
+      qa<HTMLDetailsElement>(".cd-item .cd-adv")[0]?.setAttribute("open", "");
+      q<HTMLDetailsElement>(".cd-global-adv")?.setAttribute("open", "");
     }
-    if (scene === "pairs") qa<HTMLButtonElement>(".cd-seg-btn")[1]?.click();
     if (scene === "modal" || scene === "modal-remove") {
-      const groupBtn = qa<HTMLButtonElement>(".cd-group .cd-btn.is-compact")[0];
-      // pick a group with several occurrences for a more interesting preview
-      (qa<HTMLButtonElement>(".cd-group .cd-btn.is-compact")[1] ?? groupBtn).click();
+      q<HTMLButtonElement>(".cd-fix-all")?.click();
       await wait(250);
       if (scene === "modal-remove") {
         qa<HTMLInputElement>(".cd-mode input")[2]?.click();

@@ -2,37 +2,36 @@ import { ItemView, Platform, WorkspaceLeaf, setIcon } from "obsidian";
 import type ClipDedupePlugin from "./main";
 import type { DupGroup, OverlapPair } from "./core/group";
 import { groupItem } from "./core/plan";
+import { noteDay, overview, readablePreview } from "./core/summary";
 import { StrKey, t } from "./i18n";
 import type { ScanProgress } from "./scanner";
-import { HelpManager, baseName, fmtFull, fmtNum, folderOf, iconButton, srLabel } from "./ui";
+import { splitList } from "./settings";
+import { HelpManager, baseName, fmtNum, iconButton } from "./ui";
 
 export const VIEW_TYPE_CLIP_DEDUPE = "clip-dedupe-view";
 
-type Tab = "groups" | "pairs";
 type Sort = "reclaim" | "count" | "newest";
-type Filter = "all" | "text" | "post";
 
-const PAGE = 30;
-const SVG_NS = "http://www.w3.org/2000/svg";
-let sortSeq = 0;
+const PAGE = 20;
+const NOTES_SHOWN = 4;
+let seq = 0;
 
 export class ClipDedupeView extends ItemView {
   plugin: ClipDedupePlugin;
-  private tab: Tab = "groups";
   private sort: Sort = "reclaim";
-  private filter: Filter = "all";
   private limit = PAGE;
-  private pairLimit = PAGE;
-  private selected = new Set<string>();
+  private pairLimit = 10;
   private keepChoice = new Map<string, number>();
   private expanded = new Set<string>();
-  private allPlaces = new Set<string>();
+  private allNotes = new Set<string>();
+  private advOpen = new Set<string>();
+  private globalAdvOpen = false;
+  private scopeMode: "all" | "folder" | null = null;
   private renderedVersion = -1;
   private blockText = new Map<string, string | null>();
   private help = new HelpManager();
   private headerActions!: HTMLElement;
   private bodyEl!: HTMLElement;
-  private subtitleEl!: HTMLElement;
   private progressEl: HTMLElement | null = null;
   private progressFill: HTMLElement | null = null;
 
@@ -63,11 +62,10 @@ export class ClipDedupeView extends ItemView {
     setIcon(brand.createDiv({ cls: "cd-brand-badge", attr: { "aria-hidden": "true" } }), "layers");
     const titleWrap = brand.createDiv({ cls: "cd-header-text" });
     titleWrap.createEl("h1", { cls: "cd-title", text: t("pluginName") });
-    this.subtitleEl = titleWrap.createDiv({ cls: "cd-subtitle", text: t("subtitle") });
+    titleWrap.createDiv({ cls: "cd-subtitle", text: t("tagline") });
     this.headerActions = header.createDiv({ cls: "cd-header-actions" });
     this.bodyEl = shell.createDiv({ cls: "cd-body" });
 
-    // A bubble hides again on scroll or when anything else is clicked (touch screens have no hover)
     this.registerDomEvent(root, "scroll", () => this.help.hide(), { capture: true });
     this.registerDomEvent(root.ownerDocument, "pointerdown", (e: Event) => {
       if (!(e.target as HTMLElement | null)?.closest?.(".cd-help")) this.help.hide();
@@ -88,19 +86,14 @@ export class ClipDedupeView extends ItemView {
     const p = this.plugin;
     if (p.analysis && this.renderedVersion !== p.analysisVersion) {
       this.renderedVersion = p.analysisVersion;
-      this.selected.clear();
       this.keepChoice.clear();
       this.expanded.clear();
-      this.allPlaces.clear();
+      this.allNotes.clear();
+      this.advOpen.clear();
       this.blockText.clear();
       this.limit = PAGE;
-      this.pairLimit = PAGE;
-      this.renderBody();
-    } else if (!p.analysis) {
-      this.renderBody();
-    } else if (p.scanning) {
-      // keep showing the previous result while rescanning
     }
+    if (!(p.analysis && p.scanning)) this.renderBody();
     this.contentEl.toggleClass("is-scanning", p.scanning);
   }
 
@@ -126,12 +119,13 @@ export class ClipDedupeView extends ItemView {
     else if (p.stale && p.analysis) {
       status.addClass("is-stale");
       status.setText(t("stale"));
-    } else if (p.analysis) {
-      const d = new Date(p.scannedAt);
-      status.setText(t("scannedAt", d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })));
     }
+    const what = a.createEl("button", { cls: "cd-btn is-quiet cd-what", attr: { type: "button" } });
+    setIcon(what.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "circle-help");
+    what.createSpan({ cls: "cd-btn-label", text: t("whatIsThis") });
+    what.addEventListener("click", () => p.openHelp());
     if (p.latestBackup && !p.scanning) {
-      const undo = a.createEl("button", { cls: "cd-btn", attr: { type: "button" } });
+      const undo = a.createEl("button", { cls: "cd-btn cd-undo", attr: { type: "button" } });
       setIcon(undo.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "undo-2");
       undo.createSpan({ cls: "cd-btn-label", text: t("undoLast") });
       undo.addEventListener("click", () => void p.undoLast());
@@ -139,10 +133,10 @@ export class ClipDedupeView extends ItemView {
     if (p.scanning) {
       const c = a.createEl("button", { cls: "cd-btn", text: t("cancel"), attr: { type: "button" } });
       c.addEventListener("click", () => p.cancelScan());
-    } else {
-      const s = a.createEl("button", { cls: "cd-btn is-primary", attr: { type: "button" } });
-      setIcon(s.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), p.analysis ? "refresh-cw" : "play");
-      s.createSpan({ cls: "cd-btn-label", text: p.analysis ? t("rescan") : t("scan") });
+    } else if (p.analysis) {
+      const s = a.createEl("button", { cls: "cd-btn", attr: { type: "button" } });
+      setIcon(s.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "refresh-cw");
+      s.createSpan({ cls: "cd-btn-label", text: t("rescan") });
       s.addEventListener("click", () => void p.scan());
     }
     iconButton(a, "settings", t("settings"), () => p.openSettings());
@@ -159,21 +153,15 @@ export class ClipDedupeView extends ItemView {
     const p = this.plugin;
     if (!p.analysis) {
       if (p.scanning) this.renderLoading(body);
-      else this.renderIdle(body);
+      else this.renderWelcome(body);
       return;
     }
-    const a = p.analysis;
-    this.renderTop(body);
-    if (a.groups.length === 0 && a.pairs.length === 0) {
-      const card = body.createDiv({ cls: "cd-card cd-fullempty" });
-      this.emptyState(card, "check-circle", t("noneTitle"), t("noneText"));
-      const b = card.createEl("button", { cls: "cd-btn", text: t("openSettings"), attr: { type: "button" } });
-      b.addEventListener("click", () => p.openSettings());
+    const ov = overview(p.analysis, p.ignoredSet());
+    if (ov.groups.length === 0) {
+      this.renderNone(body, ov.ignored);
       return;
     }
-    this.renderTabs(body);
-    if (this.tab === "groups") this.renderGroups(body);
-    else this.renderPairs(body);
+    this.renderResults(body);
   }
 
   private renderLoading(parent: HTMLElement) {
@@ -182,185 +170,144 @@ export class ClipDedupeView extends ItemView {
     card.createDiv({ cls: "cd-loading-text", text: t("scanning") });
     const bar = card.createDiv({ cls: "cd-progress" });
     this.progressFill = bar.createDiv({ cls: "cd-progress-fill" });
+    card.createDiv({ cls: "cd-loading-hint", text: t("scanningHint") });
     this.progressEl = card;
   }
 
-  private renderIdle(parent: HTMLElement) {
-    const card = parent.createDiv({ cls: "cd-card cd-fullempty cd-idle" });
-    this.emptyState(card, "layers", t("idleTitle"), t("idleText"));
-    const b = card.createEl("button", { cls: "cd-btn is-primary", text: t("startScan"), attr: { type: "button" } });
-    b.addEventListener("click", () => void this.plugin.scan());
-  }
+  /* ---------- welcome ---------- */
 
-  private emptyState(parent: HTMLElement, icon: string, title: string, text: string) {
-    const e = parent.createDiv({ cls: "cd-empty" });
-    setIcon(e.createDiv({ cls: "cd-empty-icon", attr: { "aria-hidden": "true" } }), icon);
-    e.createDiv({ cls: "cd-empty-title", text: title });
-    e.createDiv({ cls: "cd-empty-text", text });
-  }
+  private renderWelcome(parent: HTMLElement) {
+    const p = this.plugin;
+    const card = parent.createDiv({ cls: "cd-card cd-welcome" });
+    card.createEl("h2", { cls: "cd-welcome-title", text: t("welcomeTitle") });
+    card.createEl("p", { cls: "cd-welcome-text", text: t("welcomeText") });
 
-  /** Hero card with the headline number, and four supporting cards. */
-  private renderTop(parent: HTMLElement) {
-    const a = this.plugin.analysis;
-    if (!a) return;
-    const top = parent.createDiv({ cls: "cd-top" });
-    const hero = top.createDiv({ cls: "cd-card cd-hero" });
-    const head = hero.createDiv({ cls: "cd-hero-head" });
-    const title = head.createDiv({ cls: "cd-card-title" });
-    setIcon(title.createSpan({ cls: "cd-card-icon", attr: { "aria-hidden": "true" } }), "layers");
-    title.createSpan({ text: t("heroTitle") });
-    this.help.attach(title, t("heroHelp"));
-    const main = hero.createDiv({ cls: "cd-hero-main" });
-    const text = main.createDiv({ cls: "cd-hero-text" });
-    const num = text.createDiv({ cls: "cd-num cd-num-hero" });
-    num.createSpan({ cls: "cd-num-value", text: fmtNum(a.totals.reclaimChars) });
-    num.createSpan({ cls: "cd-num-unit", text: t("heroChars") });
-    text.createDiv({ cls: "cd-hero-note", text: t("heroSummary", fmtNum(a.totals.reclaimWords), fmtFull(a.totals.groups)) });
-    this.ring(main, a.totals.ratio);
-
-    const kpis = top.createDiv({ cls: "cd-kpis" });
-    const kpi = (icon: string, label: StrKey, help: StrKey, value: string) => {
-      const c = kpis.createDiv({ cls: "cd-card cd-kpi" });
-      const h = c.createDiv({ cls: "cd-kpi-top" });
-      setIcon(h.createSpan({ cls: "cd-kpi-icon", attr: { "aria-hidden": "true" } }), icon);
-      h.createSpan({ cls: "cd-label", text: t(label) });
-      this.help.attach(h, t(help));
-      c.createDiv({ cls: "cd-num cd-num-lg" }).createSpan({ cls: "cd-num-value", text: value });
+    const steps = card.createEl("ol", { cls: "cd-steps" });
+    const step = (n: number, icon: string, title: StrKey, text: StrKey) => {
+      const li = steps.createEl("li", { cls: "cd-step" });
+      const art = li.createDiv({ cls: "cd-step-art", attr: { "aria-hidden": "true" } });
+      setIcon(art, icon);
+      art.createSpan({ cls: "cd-step-num", text: String(n) });
+      const tx = li.createDiv({ cls: "cd-step-body" });
+      tx.createDiv({ cls: "cd-step-title", text: t(title) });
+      tx.createDiv({ cls: "cd-step-text", text: t(text) });
     };
-    kpi("files", "kpiNotes", "kpiNotesHelp", fmtFull(a.totals.notes));
-    kpi("copy", "kpiGroups", "kpiGroupsHelp", fmtFull(a.totals.groups));
-    kpi("text", "kpiBlocks", "kpiBlocksHelp", fmtFull(a.totals.blocks));
-    kpi("whole-word", "kpiWords", "kpiWordsHelp", fmtNum(a.totals.reclaimWords));
-  }
+    step(1, "search", "step1", "step1Text");
+    step(2, "copy", "step2", "step2Text");
+    step(3, "list-checks", "step3", "step3Text");
 
-  private ring(parent: HTMLElement, ratio: number) {
-    const size = 112;
-    const stroke = 12;
-    const r = (size - stroke) / 2;
-    const c = 2 * Math.PI * r;
-    const shown = ratio <= 0 ? 0 : Math.max(0.02, Math.min(1, ratio));
-    const wrap = parent.createDiv({ cls: "cd-ring" });
-    const doc = wrap.ownerDocument;
-    const svg = doc.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
-    svg.setAttribute("aria-hidden", "true");
-    const mk = (cls: string, dash?: string) => {
-      const el = doc.createElementNS(SVG_NS, "circle");
-      el.setAttribute("cx", String(size / 2));
-      el.setAttribute("cy", String(size / 2));
-      el.setAttribute("r", String(r));
-      el.setAttribute("fill", "none");
-      el.setAttribute("stroke-width", String(stroke));
-      el.setAttribute("class", cls);
-      if (dash) {
-        el.setAttribute("stroke-dasharray", dash);
-        el.setAttribute("stroke-linecap", "round");
-        el.setAttribute("transform", `rotate(-90 ${size / 2} ${size / 2})`);
-      }
-      svg.appendChild(el);
-    };
-    mk("cd-ring-track");
-    if (shown > 0) mk("cd-ring-value", `${(c * shown).toFixed(2)} ${c.toFixed(2)}`);
-    wrap.appendChild(svg);
-    const center = wrap.createDiv({ cls: "cd-ring-center" });
-    const pct = ratio * 100;
-    center.createDiv({ cls: "cd-ring-num", text: `${pct >= 10 ? Math.round(pct) : pct.toFixed(1)}%` });
-    center.createDiv({ cls: "cd-ring-caption", text: t("heroOfVault") });
-  }
-
-  private renderTabs(parent: HTMLElement) {
-    const a = this.plugin.analysis;
-    if (!a) return;
-    const bar = parent.createDiv({ cls: "cd-tabbar" });
-    const seg = bar.createDiv({ cls: "cd-seg", attr: { role: "tablist" } });
-    const mk = (id: Tab, label: StrKey, count: number, help: StrKey) => {
-      const wrap = seg.createDiv({ cls: "cd-seg-item" });
-      const b = wrap.createEl("button", {
-        cls: "cd-seg-btn" + (this.tab === id ? " is-active" : ""),
-        attr: { role: "tab", type: "button", "aria-selected": String(this.tab === id) },
+    // scope: whole vault or one folder
+    const include = splitList(p.settings.includeFolders);
+    const mode = this.scopeMode ?? (include.length ? "folder" : "all");
+    const scope = card.createDiv({ cls: "cd-scope", attr: { role: "radiogroup" } });
+    const labelId = `cd-scope-${++seq}`;
+    scope.createDiv({ cls: "cd-scope-label", text: t("scopeLabel"), attr: { id: labelId } });
+    scope.setAttr("aria-labelledby", labelId);
+    const opts = scope.createDiv({ cls: "cd-scope-opts" });
+    const opt = (value: "all" | "folder", label: StrKey, icon: string) => {
+      const b = opts.createEl("button", {
+        cls: "cd-scope-opt" + (mode === value ? " is-active" : ""),
+        attr: { type: "button", role: "radio", "aria-checked": String(mode === value) },
       });
+      setIcon(b.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), icon);
       b.createSpan({ text: t(label) });
-      b.createSpan({ cls: "cd-count", text: fmtFull(count) });
       b.addEventListener("click", () => {
-        if (this.tab === id) return;
-        this.tab = id;
-        this.renderBody();
+        this.scopeMode = value;
+        if (value === "all" && include.length) void p.setScope("").then(() => this.renderBody());
+        else this.renderBody();
       });
-      this.help.attach(wrap, t(help));
     };
-    mk("groups", "tabGroups", a.groups.length, "tabGroupsHelp");
-    mk("pairs", "tabPairs", a.pairs.length, "tabPairsHelp");
+    opt("all", "scopeAll", "book-open");
+    opt("folder", "scopeFolder", "folder");
+    if (mode === "folder") {
+      const folders = p.folderList();
+      const sel = opts.createEl("select", { cls: "dropdown cd-select cd-scope-select" });
+      const selId = `cd-folder-${++seq}`;
+      sel.id = selId;
+      sel.setAttr("aria-labelledby", labelId);
+      sel.createEl("option", { text: t("scopePick"), value: "" });
+      if (include.length > 1) sel.createEl("option", { text: t("scopeCustom", include.join(", ")), value: p.settings.includeFolders });
+      for (const f of folders) sel.createEl("option", { text: f, value: f });
+      sel.value = include.length > 1 ? p.settings.includeFolders : include[0] ?? "";
+      sel.addEventListener("change", () => void p.setScope(sel.value).then(() => this.renderBody()));
+    }
+
+    const go = card.createDiv({ cls: "cd-welcome-go" });
+    const b = go.createEl("button", { cls: "cd-btn is-primary is-big", attr: { type: "button" } });
+    setIcon(b.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "search");
+    b.createSpan({ cls: "cd-btn-label", text: t("startScan") });
+    b.disabled = mode === "folder" && include.length === 0;
+    b.addEventListener("click", () => void p.scan());
+    const safe = go.createDiv({ cls: "cd-reassure" });
+    setIcon(safe.createSpan({ cls: "cd-reassure-icon", attr: { "aria-hidden": "true" } }), "shield-check");
+    safe.createSpan({ text: t("readOnly") });
   }
 
-  /* ================= duplicate groups ================= */
+  /* ---------- nothing found ---------- */
 
-  private visibleGroups(): DupGroup[] {
+  private renderNone(parent: HTMLElement, ignored: number) {
     const a = this.plugin.analysis;
-    if (!a) return [];
-    let list = a.groups.filter((g) => this.filter === "all" || g.kind === this.filter);
-    if (this.sort === "count") list = list.slice().sort((x, y) => y.occs.length - x.occs.length || y.reclaimChars - x.reclaimChars);
-    else if (this.sort === "newest") {
-      const last = (g: DupGroup) => g.occs.reduce((m, o) => Math.max(m, a.files[o.f].mtime), 0);
-      list = list.slice().sort((x, y) => last(y) - last(x));
+    const card = parent.createDiv({ cls: "cd-card cd-fullempty" });
+    const e = card.createDiv({ cls: "cd-empty" });
+    setIcon(e.createDiv({ cls: "cd-empty-icon is-good", attr: { "aria-hidden": "true" } }), "check-circle");
+    e.createDiv({ cls: "cd-empty-title", text: t("noneTitle") });
+    e.createDiv({ cls: "cd-empty-text", text: t("noneText", a?.files.length ?? 0) + (ignored ? " " + t("noneIgnored", ignored) : "") });
+    e.createDiv({ cls: "cd-empty-tip", text: t("noneTip") });
+    const row = card.createDiv({ cls: "cd-empty-actions" });
+    const again = row.createEl("button", { cls: "cd-btn is-primary", text: t("rescan"), attr: { type: "button" } });
+    again.addEventListener("click", () => void this.plugin.scan());
+    const st = row.createEl("button", { cls: "cd-btn", text: t("openSettings"), attr: { type: "button" } });
+    st.addEventListener("click", () => this.plugin.openSettings());
+    if (ignored) {
+      const r = row.createEl("button", { cls: "cd-btn is-quiet", text: t("advRestore"), attr: { type: "button" } });
+      r.addEventListener("click", () => void this.plugin.restoreIgnored());
     }
-    return list;
   }
 
-  private renderGroups(parent: HTMLElement) {
-    const groups = this.visibleGroups();
-    const wrap = parent.createDiv({ cls: "cd-groups" });
-    const bar = wrap.createDiv({ cls: "cd-toolbar" });
+  /* ---------- results ---------- */
 
-    const left = bar.createDiv({ cls: "cd-toolbar-left" });
-    const sortWrap = left.createDiv({ cls: "cd-field" });
-    const sortLabel = sortWrap.createEl("label", { cls: "cd-label", text: t("sortLabel") });
-    const sel = sortWrap.createEl("select", { cls: "dropdown cd-select" });
-    const sortId = `cd-sort-${++sortSeq}`;
-    sel.id = sortId;
-    sortLabel.setAttr("for", sortId);
-    for (const [v, label] of [["reclaim", "sortReclaim"], ["count", "sortCount"], ["newest", "sortNewest"]] as [Sort, StrKey][]) {
-      const o = sel.createEl("option", { text: t(label), value: v });
-      if (v === this.sort) o.selected = true;
+  private sorted(groups: DupGroup[]): DupGroup[] {
+    const a = this.plugin.analysis;
+    if (!a) return groups;
+    if (this.sort === "count") return groups.slice().sort((x, y) => y.occs.length - x.occs.length || y.reclaimChars - x.reclaimChars);
+    if (this.sort === "newest") {
+      const last = (g: DupGroup) => g.occs.reduce((m, o) => Math.max(m, a.files[o.f].mtime), 0);
+      return groups.slice().sort((x, y) => last(y) - last(x));
     }
-    sel.addEventListener("change", () => {
-      this.sort = sel.value as Sort;
-      this.limit = PAGE;
-      this.renderBody();
-    });
-    const filt = left.createDiv({ cls: "cd-seg is-small", attr: { role: "group" } });
-    srLabel(filt, t("filterLabel"));
-    for (const [v, label] of [["all", "filterAll"], ["text", "filterText"], ["post", "filterPost"]] as [Filter, StrKey][]) {
-      const b = filt.createEl("button", { cls: "cd-seg-btn" + (this.filter === v ? " is-active" : ""), text: t(label), attr: { type: "button", "aria-pressed": String(this.filter === v) } });
-      b.addEventListener("click", () => {
-        this.filter = v;
-        this.limit = PAGE;
-        this.renderBody();
-      });
-    }
+    return groups;
+  }
 
-    const right = bar.createDiv({ cls: "cd-toolbar-right" });
-    const allSelected = groups.length > 0 && groups.every((g) => this.selected.has(g.id));
-    const toggle = right.createEl("button", { cls: "cd-btn is-quiet", text: allSelected ? t("selectNone") : t("selectAll"), attr: { type: "button" } });
-    toggle.addEventListener("click", () => {
-      if (allSelected) for (const g of groups) this.selected.delete(g.id);
-      else for (const g of groups) this.selected.add(g.id);
-      this.renderBody();
-    });
-    const clean = right.createEl("button", { cls: "cd-btn is-primary", attr: { type: "button" } });
-    const count = groups.filter((g) => this.selected.has(g.id)).length;
-    clean.createSpan({ cls: "cd-btn-label", text: t("cleanSelected", count) });
-    clean.disabled = count === 0;
-    clean.addEventListener("click", () => this.plugin.startCleanup(groups.filter((g) => this.selected.has(g.id)).map((g) => groupItem(g, this.keepChoice.get(g.id) ?? 0))));
+  private renderResults(parent: HTMLElement) {
+    const p = this.plugin;
+    const a = p.analysis;
+    if (!a) return;
+    const ov = overview(a, p.ignoredSet());
 
-    const list = wrap.createDiv({ cls: "cd-list" });
-    for (const g of groups.slice(0, this.limit)) this.renderGroup(list, g);
+    const sum = parent.createDiv({ cls: "cd-card cd-summary-card" });
+    const txt = sum.createDiv({ cls: "cd-summary-text" });
+    txt.createEl("h2", { cls: "cd-summary-lead", text: t("resultLead", ov.notes, ov.groups.length) });
+    txt.createDiv({ cls: "cd-summary-save", text: t("resultSave", fmtNum(ov.words)) });
+    txt.createDiv({ cls: "cd-summary-how", text: t("resultHow") });
+    const all = sum.createEl("button", { cls: "cd-btn is-primary is-big cd-fix-all", attr: { type: "button" } });
+    setIcon(all.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "sparkles");
+    all.createSpan({ cls: "cd-btn-label", text: t("fixAll") });
+    all.addEventListener("click", () => p.startCleanup(ov.groups.map((g) => groupItem(g, this.keepChoice.get(g.id) ?? 0)), "mark"));
+
+    const head = parent.createDiv({ cls: "cd-list-head" });
+    head.createEl("h3", { cls: "cd-list-title", text: t("listTitle") });
+    head.createSpan({ cls: "cd-list-sub", text: this.sort === "reclaim" ? t("listSort") : "" });
+
+    const groups = this.sorted(ov.groups);
+    const list = parent.createDiv({ cls: "cd-list" });
+    for (const g of groups.slice(0, this.limit)) this.renderItem(list, g);
     if (groups.length > this.limit) {
-      const more = wrap.createEl("button", { cls: "cd-btn cd-more", text: t("showMore", groups.length - this.limit), attr: { type: "button" } });
+      const more = parent.createEl("button", { cls: "cd-btn cd-more", text: t("showMore", Math.min(PAGE, groups.length - this.limit)), attr: { type: "button" } });
       more.addEventListener("click", () => {
         this.limit += PAGE;
         this.renderBody();
       });
     }
+    this.renderGlobalAdvanced(parent, ov.ignored);
   }
 
   private async loadText(g: DupGroup, idx: number): Promise<string | null> {
@@ -372,39 +319,26 @@ export class ClipDedupeView extends ItemView {
     return text;
   }
 
-  private renderGroup(parent: HTMLElement, g: DupGroup) {
-    const a = this.plugin.analysis;
+  private renderItem(parent: HTMLElement, g: DupGroup) {
+    const p = this.plugin;
+    const a = p.analysis;
     if (!a) return;
-    const card = parent.createDiv({ cls: "cd-card cd-group" + (this.selected.has(g.id) ? " is-selected" : "") });
-    const head = card.createDiv({ cls: "cd-group-head" });
-    const check = head.createEl("input", { cls: "cd-check", attr: { type: "checkbox" } });
-    check.checked = this.selected.has(g.id);
-    srLabel(check, t("selectGroup"));
-    check.addEventListener("change", () => {
-      if (check.checked) this.selected.add(g.id);
-      else this.selected.delete(g.id);
-      card.toggleClass("is-selected", check.checked);
-      this.updateCleanButton();
-    });
+    const keepIdx = this.keepChoice.get(g.id) ?? 0;
+    const notes = new Set(g.occs.map((o) => o.f)).size;
+    const card = parent.createDiv({ cls: "cd-card cd-item" });
 
-    const badges = head.createDiv({ cls: "cd-badges" });
-    if (g.kind === "post") {
-      const b = badges.createSpan({ cls: "cd-badge is-post" + (g.exact ? "" : " is-warn"), text: g.exact ? t("kindPost") : t("kindPostDiff") });
-      this.help.attach(b, g.exact ? t("kindPostExactHelp") : t("kindPostHelp"));
-    } else badges.createSpan({ cls: "cd-badge", text: t("kindText") });
-    badges.createSpan({ cls: "cd-badge is-muted", text: t(`blockKind_${g.blockKind}` as StrKey) });
-    head.createSpan({ cls: "cd-group-meta", text: `${t("occCount", g.occs.length)} · ${t("reclaim", fmtFull(g.reclaimChars))}` });
-    const act = head.createEl("button", { cls: "cd-btn is-compact", text: t("cleanGroup"), attr: { type: "button" } });
-    act.addEventListener("click", () => this.plugin.startCleanup([groupItem(g, this.keepChoice.get(g.id) ?? 0)]));
+    const head = card.createDiv({ cls: "cd-item-head" });
+    head.createDiv({ cls: "cd-item-title", text: t("itemTitle", notes) });
+    head.createSpan({ cls: "cd-item-save", text: t("itemSave", fmtNum(g.reclaimWords)) });
 
-    const textBox = card.createDiv({ cls: "cd-text-wrap" });
-    const textEl = textBox.createDiv({ cls: "cd-text" + (this.expanded.has(g.id) ? " is-expanded" : ""), text: t("loadingText") });
-    const toggle = textBox.createEl("button", { cls: "cd-expand", attr: { type: "button" } });
+    // the passage itself, as readable text
+    const quote = card.createDiv({ cls: "cd-quote" });
+    const textEl = quote.createDiv({ cls: "cd-quote-text" + (this.expanded.has(g.id) ? " is-expanded" : ""), text: t("loadingText") });
+    const toggle = quote.createEl("button", { cls: "cd-expand", attr: { type: "button" } });
     toggle.hide();
     const setToggle = () => {
       const open = this.expanded.has(g.id);
       toggle.empty();
-      setIcon(toggle.createSpan({ cls: "cd-expand-icon", attr: { "aria-hidden": "true" } }), open ? "chevron-up" : "chevron-down");
       toggle.createSpan({ text: open ? t("collapse") : t("expand") });
       toggle.setAttr("aria-expanded", String(open));
     };
@@ -414,137 +348,148 @@ export class ClipDedupeView extends ItemView {
       textEl.toggleClass("is-expanded", this.expanded.has(g.id));
       setToggle();
     });
-    const fill = async () => {
-      const keep = this.keepChoice.get(g.id) ?? 0;
-      const text = await this.loadText(g, keep);
+    void (async () => {
+      const raw = await this.loadText(g, keepIdx);
       if (!card.isConnected) return;
-      if (text === null) {
+      if (raw === null) {
         textEl.setText(t("textUnavailable"));
         return;
       }
-      const shown = g.blockKind === "tr" ? text.replace(/^\s*\|\s*|\s*\|\s*$/g, "").replace(/\s*\|\s*/g, "  ·  ") : text;
-      const clipped = shown.length > 4000 ? shown.slice(0, 4000) + "…" : shown;
-      textEl.setText(clipped);
-      if (clipped.length > 140 || clipped.split("\n").length > 2) {
+      const shown = readablePreview(raw, 3000);
+      textEl.setText(shown);
+      if (shown.length > 120 || shown.split("\n").length > 3) {
         setToggle();
         toggle.show();
       }
-    };
-    void fill();
+    })();
+    if (g.kind === "post" && !g.exact) card.createDiv({ cls: "cd-item-warn", text: t("itemPostWarn") });
 
-    const occs = card.createDiv({ cls: "cd-occs", attr: { role: "radiogroup" } });
-    const legend = occs.createDiv({ cls: "cd-occs-legend" });
-    legend.createSpan({ text: t("keepWhich") });
-    this.help.attach(legend, t("keepHelp"));
-    const keepIdx = this.keepChoice.get(g.id) ?? 0;
-    const PLACES = 5;
-    const showAll = this.allPlaces.has(g.id) || g.occs.length <= PLACES + 1;
-    g.occs.forEach((o, i) => {
-      if (!showAll && i >= PLACES && i !== keepIdx) return;
+    // which notes it is in
+    const where = card.createDiv({ cls: "cd-where" });
+    where.createDiv({ cls: "cd-where-label", text: t("inNotes") });
+    const ul = where.createEl("ul", { cls: "cd-notes" });
+    const seen = new Set<number>();
+    const rows = g.occs.map((o, i) => ({ o, i })).filter(({ o }) => (seen.has(o.f) ? false : (seen.add(o.f), true)));
+    const showAll = this.allNotes.has(g.id) || rows.length <= NOTES_SHOWN + 1;
+    rows.forEach(({ o, i }, n) => {
+      if (!showAll && n >= NOTES_SHOWN && i !== keepIdx) return;
       const file = a.files[o.f];
       const isKeep = i === keepIdx;
-      const row = occs.createDiv({ cls: "cd-occ" + (isKeep ? " is-keep" : "") });
-      const radio = row.createEl("button", { cls: "cd-radio", attr: { type: "button", role: "radio", "aria-checked": String(isKeep) } });
-      radio.createSpan({ cls: "cd-radio-dot", attr: { "aria-hidden": "true" } });
-      srLabel(radio, t("keepNote", baseName(o.path)));
-      radio.addEventListener("click", () => {
-        if (i === keepIdx) return;
-        this.keepChoice.set(g.id, i);
-        occs.querySelectorAll(".cd-occ").forEach((el, j) => {
-          el.toggleClass("is-keep", j === i);
-          el.querySelector(".cd-radio")?.setAttribute("aria-checked", String(j === i));
-        });
-        void fill();
-      });
-      const link = row.createEl("button", { cls: "cd-occ-link", attr: { type: "button" } });
-      link.createSpan({ cls: "cd-occ-name", text: baseName(o.path) });
-      link.createSpan({ cls: "cd-occ-line", text: `L${o.block.s + 1}` });
-      srLabel(link, t("openAt", baseName(o.path), o.block.s + 1));
-      link.addEventListener("click", (e) => void this.plugin.openNote(o.path, o.block.s, e));
-      const folder = folderOf(o.path);
-      if (folder) row.createSpan({ cls: "cd-occ-folder", text: folder });
-      row.createSpan({ cls: "cd-occ-date", text: new Date(file.mtime).toLocaleDateString() });
-      row.createSpan({ cls: "cd-pill", text: t("kept") });
+      const li = ul.createEl("li", { cls: "cd-note" + (isKeep ? " is-keep" : "") });
+      li.createSpan({ cls: "cd-note-tag", text: isKeep ? t("tagKeep") : t("tagDup") });
+      li.createSpan({ cls: "cd-note-date", text: noteDay(file) });
+      const link = li.createEl("button", { cls: "cd-note-link", text: baseName(o.path), attr: { type: "button", title: o.path } });
+      link.addEventListener("click", (e) => void p.openNote(o.path, o.block.s, e));
+      if (i === 0) li.createSpan({ cls: "cd-note-earliest", text: t("tagEarliest") });
     });
-    if (g.occs.length > PLACES + 1) {
-      const hidden = g.occs.length - PLACES - (keepIdx >= PLACES ? 1 : 0);
-      const more = occs.createEl("button", { cls: "cd-expand cd-places", attr: { type: "button" } });
-      setIcon(more.createSpan({ cls: "cd-expand-icon", attr: { "aria-hidden": "true" } }), showAll ? "chevron-up" : "chevron-down");
-      more.createSpan({ text: showAll ? t("occLess") : t("occMore", hidden) });
+    if (!showAll) {
+      const more = where.createEl("button", { cls: "cd-expand", text: t("showAllNotes", rows.length), attr: { type: "button" } });
       more.addEventListener("click", () => {
-        if (showAll) this.allPlaces.delete(g.id);
-        else this.allPlaces.add(g.id);
+        this.allNotes.add(g.id);
         this.renderBody();
       });
     }
+
+    // one obvious action, one way out
+    const acts = card.createDiv({ cls: "cd-item-actions" });
+    const main = acts.createEl("button", { cls: "cd-btn is-primary", attr: { type: "button" } });
+    setIcon(main.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "check");
+    main.createSpan({ cls: "cd-btn-label", text: keepIdx === 0 ? t("keepEarliest") : t("keepChosen") });
+    main.addEventListener("click", () => p.startCleanup([groupItem(g, keepIdx)], "mark"));
+    const ign = acts.createEl("button", { cls: "cd-btn is-quiet", text: t("ignore"), attr: { type: "button" } });
+    ign.addEventListener("click", () => void p.ignoreGroup(g));
+
+    // everything else, folded away
+    const adv = card.createEl("details", { cls: "cd-adv" });
+    if (this.advOpen.has(g.id)) adv.setAttr("open", "");
+    adv.addEventListener("toggle", () => {
+      if (adv.open) this.advOpen.add(g.id);
+      else this.advOpen.delete(g.id);
+    });
+    adv.createEl("summary", { cls: "cd-adv-summary", text: t("advanced") });
+    const ab = adv.createDiv({ cls: "cd-adv-body" });
+    ab.createDiv({ cls: "cd-adv-title", text: t("advKeepTitle") });
+    ab.createDiv({ cls: "cd-adv-text", text: t("advKeepText") });
+    const picks = ab.createDiv({ cls: "cd-keep-picks", attr: { role: "radiogroup" } });
+    rows.forEach(({ o, i }) => {
+      const b = picks.createEl("button", {
+        cls: "cd-keep-pick" + (i === keepIdx ? " is-active" : ""),
+        attr: { type: "button", role: "radio", "aria-checked": String(i === keepIdx) },
+      });
+      b.createSpan({ cls: "cd-radio-dot", attr: { "aria-hidden": "true" } });
+      b.createSpan({ text: `${noteDay(a.files[o.f])} · ${baseName(o.path)}` });
+      b.addEventListener("click", () => {
+        this.keepChoice.set(g.id, i);
+        this.advOpen.add(g.id);
+        this.renderBody();
+      });
+    });
+    ab.createDiv({ cls: "cd-adv-title", text: t("advOtherWays") });
+    ab.createDiv({ cls: "cd-adv-text", text: t("advOtherWaysText") });
+    const other = ab.createEl("button", { cls: "cd-btn is-compact", text: t("advChoose"), attr: { type: "button" } });
+    other.addEventListener("click", () => p.startCleanup([groupItem(g, keepIdx)]));
   }
 
-  private updateCleanButton() {
-    const btn = this.bodyEl.querySelector<HTMLButtonElement>(".cd-toolbar-right .is-primary");
-    if (!btn) return;
-    const groups = this.visibleGroups();
-    const count = groups.filter((g) => this.selected.has(g.id)).length;
-    btn.disabled = count === 0;
-    const label = btn.querySelector(".cd-btn-label");
-    if (label) label.textContent = t("cleanSelected", count);
-  }
+  /* ---------- page-level advanced options ---------- */
 
-  /* ================= overlapping notes ================= */
-
-  private renderPairs(parent: HTMLElement) {
+  private renderGlobalAdvanced(parent: HTMLElement, ignored: number) {
     const a = this.plugin.analysis;
     if (!a) return;
-    const wrap = parent.createDiv({ cls: "cd-pairs" });
-    if (a.pairs.length === 0) {
-      const card = wrap.createDiv({ cls: "cd-card cd-fullempty" });
-      this.emptyState(card, "files", t("pairsNone"), t("pairsNoneText"));
-      return;
+    const det = parent.createEl("details", { cls: "cd-card cd-global-adv" });
+    if (this.globalAdvOpen) det.setAttr("open", "");
+    det.addEventListener("toggle", () => (this.globalAdvOpen = det.open));
+    const sum = det.createEl("summary", { cls: "cd-adv-summary" });
+    setIcon(sum.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "sliders-horizontal");
+    sum.createSpan({ text: t("globalAdv") });
+    const body = det.createDiv({ cls: "cd-adv-body" });
+
+    const sortRow = body.createDiv({ cls: "cd-field" });
+    const sortId = `cd-sort-${++seq}`;
+    sortRow.createEl("label", { cls: "cd-adv-title", text: t("advSort"), attr: { for: sortId } });
+    const sel = sortRow.createEl("select", { cls: "dropdown cd-select" });
+    sel.id = sortId;
+    for (const [v, label] of [["reclaim", "sortReclaim"], ["count", "sortCount"], ["newest", "sortNewest"]] as [Sort, StrKey][]) {
+      const o = sel.createEl("option", { text: t(label), value: v });
+      if (v === this.sort) o.selected = true;
     }
-    const list = wrap.createDiv({ cls: "cd-list" });
-    for (const p of a.pairs.slice(0, this.pairLimit)) this.renderPair(list, p);
+    sel.addEventListener("change", () => {
+      this.sort = sel.value as Sort;
+      this.limit = PAGE;
+      this.renderBody();
+    });
+
+    if (ignored > 0) {
+      const r = body.createDiv({ cls: "cd-field" });
+      r.createSpan({ cls: "cd-adv-title", text: t("advIgnored", ignored) });
+      const b = r.createEl("button", { cls: "cd-btn is-compact", text: t("advRestore"), attr: { type: "button" } });
+      b.addEventListener("click", () => void this.plugin.restoreIgnored());
+    }
+
+    body.createDiv({ cls: "cd-adv-title", text: t("advPairs") });
+    body.createDiv({ cls: "cd-adv-text", text: t("advPairsText") });
+    if (a.pairs.length === 0) body.createDiv({ cls: "cd-adv-text", text: t("pairsNone") });
+    const list = body.createDiv({ cls: "cd-pairs" });
+    for (const pr of a.pairs.slice(0, this.pairLimit)) this.renderPair(list, pr);
     if (a.pairs.length > this.pairLimit) {
-      const more = wrap.createEl("button", { cls: "cd-btn cd-more", text: t("showMore", a.pairs.length - this.pairLimit), attr: { type: "button" } });
+      const more = body.createEl("button", { cls: "cd-btn cd-more", text: t("showMore", a.pairs.length - this.pairLimit), attr: { type: "button" } });
       more.addEventListener("click", () => {
-        this.pairLimit += PAGE;
+        this.pairLimit += 10;
         this.renderBody();
       });
-    }
-    if (a.skippedBroad > 0) {
-      const note = wrap.createDiv({ cls: "cd-aside" });
-      note.createSpan({ text: t("pairsBroad", a.skippedBroad) });
     }
   }
 
   private renderPair(parent: HTMLElement, p: OverlapPair) {
-    const card = parent.createDiv({ cls: "cd-card cd-pair" });
-    const head = card.createDiv({ cls: "cd-pair-head" });
-    const pct = Math.round(p.newerRatio * 100);
-    head.createDiv({ cls: "cd-pair-title", text: t("pairInNewer", baseName(p.newer), pct) });
-    head.createSpan({ cls: "cd-group-meta", text: t("pairShared", p.sharedBlocks, fmtFull(p.sharedChars)) });
-
-    const rows = card.createDiv({ cls: "cd-pair-rows" });
-    const row = (label: StrKey, path: string, ratio: number) => {
-      const r = rows.createDiv({ cls: "cd-pair-row" });
-      r.createSpan({ cls: "cd-badge is-muted", text: t(label) });
-      const link = r.createEl("button", { cls: "cd-occ-link", attr: { type: "button" } });
-      link.createSpan({ cls: "cd-occ-name", text: baseName(path) });
-      srLabel(link, t("openAt", baseName(path), 1));
-      link.addEventListener("click", (e) => void this.plugin.openNote(path, undefined, e));
-      const folder = folderOf(path);
-      if (folder) r.createSpan({ cls: "cd-occ-folder", text: folder });
-      const meter = r.createDiv({ cls: "cd-meter", attr: { "aria-hidden": "true" } });
-      meter.createDiv({ cls: "cd-meter-fill" }).setCssProps({ "--cd-fill": `${Math.round(ratio * 100)}%` });
-      r.createSpan({ cls: "cd-pair-pct", text: t("pairRatioOf", Math.round(ratio * 100)) });
-    };
-    row("pairOlder", p.older, p.olderRatio);
-    row("pairNewer", p.newer, p.newerRatio);
-
-    const actions = card.createDiv({ cls: "cd-pair-actions" });
-    const both = actions.createEl("button", { cls: "cd-btn is-compact", attr: { type: "button" } });
-    setIcon(both.createSpan({ cls: "cd-btn-icon", attr: { "aria-hidden": "true" } }), "files");
-    both.createSpan({ text: t("pairOpenBoth") });
+    const row = parent.createDiv({ cls: "cd-pair" });
+    row.createDiv({ cls: "cd-pair-title", text: t("pairTitle", baseName(p.newer), Math.round(p.newerRatio * 100)) });
+    const w = row.createDiv({ cls: "cd-pair-with" });
+    w.createSpan({ text: t("pairWith") });
+    const link = w.createEl("button", { cls: "cd-note-link", text: baseName(p.older), attr: { type: "button", title: p.older } });
+    link.addEventListener("click", (e) => void this.plugin.openNote(p.older, undefined, e));
+    const acts = row.createDiv({ cls: "cd-pair-actions" });
+    const both = acts.createEl("button", { cls: "cd-btn is-compact", text: t("pairOpenBoth"), attr: { type: "button" } });
     both.addEventListener("click", () => void this.plugin.openBoth(p.older, p.newer));
-    const clean = actions.createEl("button", { cls: "cd-btn is-compact is-primary", text: t("pairClean"), attr: { type: "button" } });
+    const clean = acts.createEl("button", { cls: "cd-btn is-compact", text: t("pairClean"), attr: { type: "button" } });
     clean.addEventListener("click", () => this.plugin.startCleanup(this.plugin.pairItems(p.groupIds, p.older, p.newer)));
   }
 }
